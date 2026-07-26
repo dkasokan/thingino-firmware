@@ -171,7 +171,7 @@ config BR2_PACKAGE_THINGINO_RAPTOR_TLS
 
 menuconfig BR2_PACKAGE_THINGINO_RAPTOR_IVS_DETECT
 	bool "IVS detection"
-	default n
+	default y
 	select BR2_THINGINO_LIBSTDCPP
 	help
 	  Enable IVS (Intelligent Video Surveillance) detection in RVD.
@@ -198,7 +198,7 @@ config BR2_PACKAGE_THINGINO_RAPTOR_IVS_YOLOV5
 
 config BR2_PACKAGE_THINGINO_RAPTOR_IVS_PERSONDET
 	bool "PersonDet algorithm (libpersonDet_inf.so + MXU libs)"
-	default n
+	default y
 	select BR2_PACKAGE_INGENIC_LIB_PERSONDET
 	select BR2_THINGINO_LIBSTDCPP
 	help
