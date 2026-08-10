@@ -259,24 +259,120 @@ thingino_heartbeat_raptor_payload() {
 		"$(thingino_heartbeat_wireguard_status)"
 }
 
+thingino_heartbeat_native_payload() {
+	# Quick path: read daynight mode and brightness from daynightd's files.
+	# For full sensor data (total_gain, EV, etc), read /run/thingino/daynight_sensors.
+	# Also try prudyntctl for mic/spk/image data which only prudynt can provide.
+
+	now=$(date +%s)
+	uptime=$(cut -d '.' -f 1 /proc/uptime 2>/dev/null || printf '0')
+
+	# daynightd is the single source of truth for photosensing
+	daynight_mode="unknown"
+	if [ -r /run/thingino/daynight_mode ]; then
+		daynight_mode=$(cat /run/thingino/daynight_mode 2>/dev/null | tr -d '\n')
+	fi
+
+	daynight_brightness="null"
+	if [ -r /run/thingino/daynight_brightness ]; then
+		_v=$(cat /run/thingino/daynight_brightness 2>/dev/null | tr -d '\n')
+		[ -n "$_v" ] && daynight_brightness=$_v
+	fi
+
+	# Sensor telemetry from daynightd's JSON file.
+	# Use brightness_percent for the button display (0-100, user-friendly).
+	# ev_log2 / primary_signal are available in the sensor file for charts.
+	total_gain="null"
+	if [ -r /run/thingino/daynight_sensors ] && command -v jct >/dev/null 2>&1; then
+		_bp=$(jct /run/thingino/daynight_sensors get brightness_percent 2>/dev/null | tr -d '\n"')
+		[ -n "$_bp" ] && [ "$_bp" != "null" ] && total_gain=$_bp
+	fi
+
+	_color_mode="null"
+	case "$daynight_mode" in
+		day) _color_mode=0 ;;
+		night) _color_mode=1 ;;
+	esac
+
+	# Audio and image from prudyntctl (prudynt still owns these)
+	mic_enabled=0
+	spk_enabled=0
+	unset _mic_queried _spk_queried
+	if command -v prudyntctl >/dev/null 2>&1; then
+		_tmp=$(mktemp)
+		if timeout 1 prudyntctl json '{"audio":{"mic_enabled":null,"spk_enabled":null},"image":{"running_mode":null}}' >"$_tmp" 2>/dev/null; then
+			_mic_val=$(jct "$_tmp" get audio.mic_enabled 2>/dev/null | tr -d '\n"')
+			case "$_mic_val" in true | 1)
+				mic_enabled=1
+				_mic_queried=1
+				;;
+			*)
+				mic_enabled=0
+				_mic_queried=1
+				;;
+			esac
+			_spk_val=$(jct "$_tmp" get audio.spk_enabled 2>/dev/null | tr -d '\n"')
+			case "$_spk_val" in true | 1)
+				spk_enabled=1
+				_spk_queried=1
+				;;
+			*)
+				spk_enabled=0
+				_spk_queried=1
+				;;
+			esac
+			# Always prefer image.running_mode from prudynt for color_mode
+			# (it reflects actual ISP state, unlike daynight_mode which is the
+			# photosensing policy and may not match after a manual toggle)
+			_cm=$(jct "$_tmp" get image.running_mode 2>/dev/null | tr -d '\n"')
+			case "$_cm" in 1) _color_mode=1 ;; 0) _color_mode=0 ;; esac
+		fi
+		rm -f "$_tmp"
+	fi
+
+	daynight_enabled="false"
+	if [ -f /etc/thingino.json ] && command -v jct >/dev/null 2>&1; then
+		_val=$(jct /etc/thingino.json get daynight.enabled 2>/dev/null | tr -d '\n"')
+		case "$_val" in true | 1) daynight_enabled=1 ;; *) daynight_enabled=0 ;; esac
+	fi
+
+	rec_ch0=0
+	rec_ch1=0
+	[ -f /run/prudynt/mp4ctl-ch0.active ] && rec_ch0=1
+	[ -f /run/prudynt/mp4ctl-ch1.active ] && rec_ch1=1
+
+	motion_enabled=0
+	[ -f /run/prudynt/motion.active ] && motion_enabled=1
+
+	privacy_enabled=0
+	[ -f /run/prudynt/privacy.active ] && privacy_enabled=1
+
+	# mic/spk: prefer prudyntctl query, fall back to runtime files
+	if [ -z "${_mic_queried:-}" ]; then
+		mic_enabled=0
+		[ -f /run/prudynt/mic.active ] && mic_enabled=1
+		spk_enabled=0
+		[ -f /run/prudynt/spk.active ] && spk_enabled=1
+	fi
+
+	wg_status="0"
+	if command -v wg >/dev/null 2>&1; then
+		case "$(wg show wg0 2>/dev/null)" in
+			*"latest handshake"*) wg_status="1" ;;
+		esac
+	fi
+
+	printf '{"time_now":%s,"uptime":%s,"daynight_brightness":%s,"total_gain":%s,"daynight_mode":"%s","rec_ch0":%s,"rec_ch1":%s,"motion_enabled":%s,"privacy_enabled":%s,"color_mode":%s,"mic_enabled":%s,"spk_enabled":%s,"daynight_enabled":%s,"ircut_state":%s,"ir850_state":%s,"ir940_state":%s,"white_state":%s,"wg_status":%s}\n' \
+		"$now" "$uptime" "$daynight_brightness" "$total_gain" "$daynight_mode" "$rec_ch0" "$rec_ch1" \
+		"$motion_enabled" "$privacy_enabled" "$_color_mode" "$mic_enabled" "$spk_enabled" \
+		"$daynight_enabled" \
+		"$(thingino_heartbeat_ircut_state)" \
+		"$(thingino_heartbeat_light_state ir850)" \
+		"$(thingino_heartbeat_light_state ir940)" \
+		"$(thingino_heartbeat_light_state white)" \
+		"$wg_status"
+}
+
 thingino_heartbeat_payload() {
-	agent_heartbeat=$(thingino_heartbeat_agent_request /api/v1/runtime/heartbeat)
-	agent_backend=$(thingino_heartbeat_agent_backend_name || true)
-
-	if [ "$agent_backend" = "none" ] && thingino_heartbeat_raptor_available; then
-		thingino_heartbeat_raptor_payload
-		return 0
-	fi
-
-	if [ -n "$agent_heartbeat" ]; then
-		printf '%s\n' "$agent_heartbeat"
-		return 0
-	fi
-
-	if thingino_heartbeat_raptor_available; then
-		thingino_heartbeat_raptor_payload
-		return 0
-	fi
-
-	printf '{}\n'
+	thingino_heartbeat_native_payload
 }
